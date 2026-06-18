@@ -496,37 +496,84 @@ impl GraphUtil {
             nodes.get_unchecked(node_id)
         };
         match node {
-            OverlayNode::Bridge(bridge) => {
-                if bridge[0] == link_id {
-                    bridge[1]
-                } else {
-                    bridge[0]
-                }
-            }
-            OverlayNode::Cross(indices) => {
-                GraphUtil::find_nearest_link_to(links, link_id, node_id, clockwise, indices, visited)
-            }
+            OverlayNode::Bridge(bridge) => GraphUtil::other_bridge_link(bridge, link_id),
+            OverlayNode::Cross(indices) => GraphUtil::find_nearest_link_to::<I, D, false>(
+                links,
+                link_id,
+                node_id,
+                clockwise,
+                indices,
+                visited,
+                usize::MAX,
+            ),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_link_or_start_link<I: IntNumber, D>(
+        links: &[OverlayLink<I, D>],
+        nodes: &[OverlayNode],
+        link_id: usize,
+        node_id: usize,
+        clockwise: bool,
+        visited: &[VisitState],
+        start_link_id: usize,
+        contour_start_node_id: usize,
+    ) -> usize {
+        // Only the contour start node may close through the already visited start link.
+        if node_id != contour_start_node_id {
+            return GraphUtil::next_link(links, nodes, link_id, node_id, clockwise, visited);
+        }
+
+        let node = unsafe {
+            // SAFETY: all node ids flowing through traversal originate from GraphBuilder,
+            // hence are within `0..nodes.len()`.
+            nodes.get_unchecked(node_id)
+        };
+        match node {
+            OverlayNode::Bridge(bridge) => GraphUtil::other_bridge_link(bridge, link_id),
+            OverlayNode::Cross(indices) => GraphUtil::find_nearest_link_to::<I, D, true>(
+                links,
+                link_id,
+                node_id,
+                clockwise,
+                indices,
+                visited,
+                start_link_id,
+            ),
+        }
+    }
+
+    #[inline(always)]
+    fn other_bridge_link(bridge: &[usize; 2], link_id: usize) -> usize {
+        if bridge[0] == link_id {
+            bridge[1]
+        } else {
+            bridge[0]
         }
     }
 
     // Assumes: `indices` comes from an OverlayNode::Cross built by GraphBuilder,
     // so every element is a valid index into `links`, and at least one of them is
-    // still unvisited when we enter. The unchecked accesses rely on that invariant.
+    // still unvisited when we enter. When `ALLOW_START_LINK` is true, the already
+    // visited `start_link_id` is also considered as a closing candidate.
+    // The unchecked accesses rely on those invariants.
     #[inline]
-    fn find_nearest_link_to<I: IntNumber, D>(
+    fn find_nearest_link_to<I: IntNumber, D, const ALLOW_START_LINK: bool>(
         links: &[OverlayLink<I, D>],
         target_index: usize,
         node_id: usize,
         clockwise: bool,
         indices: &[usize],
         visited: &[VisitState],
+        start_link_id: usize,
     ) -> usize {
         let mut is_first = true;
         let mut first_index = 0;
         let mut second_index = usize::MAX;
         let mut pos = 0;
         for (i, &link_index) in indices.iter().enumerate() {
-            if visited.is_not_visited(link_index) {
+            if visited.is_not_visited(link_index) || (ALLOW_START_LINK && link_index == start_link_id) {
                 if is_first {
                     first_index = link_index;
                     is_first = false;
@@ -574,7 +621,7 @@ impl GraphUtil {
 
         // check the rest vectors
         for &link_index in indices.iter().skip(pos + 1) {
-            if visited.is_not_visited(link_index) {
+            if visited.is_not_visited(link_index) || (ALLOW_START_LINK && link_index == start_link_id) {
                 let p = unsafe {
                     // SAFETY: every link_index here is sourced from indices, so it addresses links.
                     links.get_unchecked(link_index)

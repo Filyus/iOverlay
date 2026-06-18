@@ -4,6 +4,7 @@ use crate::core::extract::{
     BooleanExtractionBuffer, GraphContour, GraphUtil, StartPathData, Visit, VisitState,
 };
 use crate::core::graph::OverlayGraph;
+use crate::core::link::OverlayLink;
 use crate::core::overlay::ContourDirection;
 use crate::core::overlay_rule::OverlayRule;
 use crate::geom::v_segment::VSegment;
@@ -128,7 +129,7 @@ where
 
                 let start_data = StartPathData::new(is_main_dir_cw, link, left_top_link);
 
-                self.find_contour(
+                self.find_ogc_contour(
                     &start_data,
                     is_main_dir_cw,
                     VisitState::HullVisited,
@@ -185,6 +186,36 @@ where
         shapes
     }
 
+    fn next_ogc_contour_link(
+        &self,
+        start_data: &StartPathData<I>,
+        clockwise: bool,
+        visited: &[VisitState],
+        link_id: &mut usize,
+        node_id: usize,
+    ) -> Option<&OverlayLink<I>> {
+        *link_id = GraphUtil::next_link_or_start_link(
+            self.links,
+            self.nodes,
+            *link_id,
+            node_id,
+            clockwise,
+            visited,
+            start_data.link_id,
+            start_data.last_node_id,
+        );
+
+        if *link_id == start_data.link_id {
+            return None;
+        }
+
+        Some(unsafe {
+            // Safety: `link_id` is always derived from a previous in-bounds index or
+            // from `find_left_top_link`, so it remains in `0..self.links.len()`.
+            self.links.get_unchecked(*link_id)
+        })
+    }
+
     fn skip_contour(
         &self,
         start_data: &StartPathData<I>,
@@ -194,25 +225,39 @@ where
     ) {
         let mut link_id = start_data.link_id;
         let mut node_id = start_data.node_id;
-        let last_node_id = start_data.last_node_id;
 
         visited.visit_edge(link_id, visited_state);
 
         // Find a closed tour
-        while node_id != last_node_id {
-            link_id = GraphUtil::next_link(self.links, self.nodes, link_id, node_id, clockwise, visited);
+        while let Some(link) =
+            self.next_ogc_contour_link(start_data, clockwise, visited, &mut link_id, node_id)
+        {
+            node_id = link.other(node_id).id;
 
-            let link = unsafe {
-                // Safety: `link_id` is always derived from a previous in-bounds index or
-                // from `find_left_top_link`, so it remains in `0..self.links.len()`.
-                self.links.get_unchecked(link_id)
-            };
+            visited.visit_edge(link_id, visited_state);
+        }
+    }
 
-            node_id = if link.a.id == node_id {
-                link.b.id
-            } else {
-                link.a.id
-            };
+    fn find_ogc_contour(
+        &self,
+        start_data: &StartPathData<I>,
+        clockwise: bool,
+        visited_state: VisitState,
+        visited: &mut [VisitState],
+        points: &mut Vec<IntPoint<I>>,
+    ) {
+        let mut link_id = start_data.link_id;
+        let mut node_id = start_data.node_id;
+
+        visited.visit_edge(link_id, visited_state);
+        points.clear();
+        points.push(start_data.begin);
+
+        // Find a closed tour
+        while let Some(link) =
+            self.next_ogc_contour_link(start_data, clockwise, visited, &mut link_id, node_id)
+        {
+            node_id = points.push_node_and_get_other(link, node_id);
 
             visited.visit_edge(link_id, visited_state);
         }
@@ -228,7 +273,6 @@ where
     ) -> Option<IntShape<I>> {
         let mut link_id = start_data.link_id;
         let mut node_id = start_data.node_id;
-        let last_node_id = start_data.last_node_id;
 
         // First, mark all edges that belong to the contour.
 
@@ -240,27 +284,10 @@ where
         let mut original_contour_len = 1;
 
         // Find a closed tour
-        while node_id != last_node_id {
-            link_id = GraphUtil::next_link(
-                self.links,
-                self.nodes,
-                link_id,
-                node_id,
-                clockwise,
-                global_visited,
-            );
-
-            let link = unsafe {
-                // Safety: `link_id` is always derived from a previous in-bounds index or
-                // from `find_left_top_link`, so it remains in `0..self.links.len()`.
-                self.links.get_unchecked(link_id)
-            };
-
-            node_id = if link.a.id == node_id {
-                link.b.id
-            } else {
-                link.a.id
-            };
+        while let Some(link) =
+            self.next_ogc_contour_link(start_data, clockwise, global_visited, &mut link_id, node_id)
+        {
+            node_id = link.other(node_id).id;
             end_link_id = end_link_id.max(link_id);
             contour_visited.visit_edge(link_id, VisitState::Unvisited);
             global_visited.visit_edge(link_id, VisitState::HullVisited);
@@ -271,7 +298,7 @@ where
         // all links escape current contour are skipped in `contour_visited`.
 
         points.reserve_capacity(original_contour_len);
-        self.find_contour(
+        self.find_ogc_contour(
             start_data,
             !clockwise,
             VisitState::HullVisited,
@@ -318,7 +345,7 @@ where
                 // Self-touch splits can only produce holes inside this contour.
 
                 let hole_start_data = StartPathData::new(clockwise, link, left_top_link);
-                self.find_contour(
+                self.find_ogc_contour(
                     &hole_start_data,
                     clockwise,
                     VisitState::HoleVisited,
